@@ -1,10 +1,10 @@
 
-const WORKER =
-  "https://ctgmovies-api.proshantobarua70-4a5.workers.dev";
+const WORKER = "https://ctgmovies-api.proshantobarua70-4a5.workers.dev";
 
 const PAGE_SIZE = 100;
 const MAX_WORKER_PAGES = 127;
 const CACHE_MS = 60_000;
+
 const pageCache = new Map();
 const itemCache = new Map();
 
@@ -16,10 +16,9 @@ const KIND = {
 
 const manifest = {
   id: "com.ctgmovies.d1addon",
-  version: "1.0.0",
+  version: "1.0.1",
   name: "CTGMovies D1",
-  description:
-    "CTGMovies catalog powered by Cloudflare D1",
+  description: "CTGMovies catalog powered by Cloudflare D1",
   resources: [
     "catalog",
     {
@@ -80,6 +79,14 @@ function parseJSON(value, fallback = null) {
   }
 }
 
+function decodeId(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function normalize(item) {
   if (!item) return null;
 
@@ -91,7 +98,7 @@ function normalize(item) {
   };
 }
 
-async function workerJSON(path, timeout = 9000) {
+async function workerJSON(path, timeout = 12000) {
   const response = await fetch(WORKER + path, {
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(timeout),
@@ -118,9 +125,7 @@ async function getPage(page) {
     return cached.items;
   }
 
-  const data = await workerJSON(
-    `/movies?page=${page}`
-  );
+  const data = await workerJSON(`/movies?page=${page}`);
 
   const items = (data.items || [])
     .map(normalize)
@@ -135,12 +140,10 @@ async function getPage(page) {
 }
 
 async function getItem(id) {
-  if (itemCache.has(id)) {
-    const cached = itemCache.get(id);
+  const cached = itemCache.get(id);
 
-    if (Date.now() - cached.time < CACHE_MS) {
-      return cached.item;
-    }
+  if (cached && Date.now() - cached.time < CACHE_MS) {
+    return cached.item;
   }
 
   const data = await workerJSON(
@@ -171,10 +174,16 @@ function catalogCard(item) {
     poster: item.poster || undefined,
     background: item.backdrop || undefined,
     description: item.overview || undefined,
-    releaseInfo: item.year
-      ? String(item.year)
-      : undefined,
+    releaseInfo: item.year ? String(item.year) : undefined,
   };
+}
+
+function safeDate(value) {
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? undefined
+    : date.toISOString();
 }
 
 function metadata(item) {
@@ -185,18 +194,10 @@ function metadata(item) {
     poster: item.poster || undefined,
     background: item.backdrop || undefined,
     description: item.overview || undefined,
-    releaseInfo: item.year
-      ? String(item.year)
-      : undefined,
-    imdbRating: item.rating
-      ? String(item.rating)
-      : undefined,
-    genres: Array.isArray(item.genres)
-      ? item.genres
-      : [],
-    runtime: item.runtime
-      ? `${item.runtime} min`
-      : undefined,
+    releaseInfo: item.year ? String(item.year) : undefined,
+    imdbRating: item.rating ? String(item.rating) : undefined,
+    genres: Array.isArray(item.genres) ? item.genres : [],
+    runtime: item.runtime ? `${item.runtime} min` : undefined,
   };
 
   if (item.trailer) {
@@ -214,20 +215,11 @@ function metadata(item) {
       episode: Number(ep.e || 1),
       overview: ep.overview || undefined,
       thumbnail: ep.still || undefined,
-      released: ep.air
-        ? safeDate(ep.air)
-        : undefined,
+      released: ep.air ? safeDate(ep.air) : undefined,
     }));
   }
 
   return meta;
-}
-
-function safeDate(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? undefined
-    : date.toISOString();
 }
 
 function parseExtras(parts) {
@@ -241,11 +233,7 @@ function parseExtras(parts) {
     const key = part.slice(0, index);
     const value = part.slice(index + 1);
 
-    try {
-      result[key] = decodeURIComponent(value);
-    } catch {
-      result[key] = value;
-    }
+    result[key] = decodeId(value);
   }
 
   return result;
@@ -270,8 +258,6 @@ async function catalog(id, extras) {
   let page = 1;
   let exhausted = false;
 
-  // Read pages in small batches instead of launching
-  // 127 simultaneous requests.
   while (
     page <= MAX_WORKER_PAGES &&
     !exhausted &&
@@ -291,7 +277,8 @@ async function catalog(id, extras) {
       pages.map(async (p) => {
         try {
           return await getPage(p);
-        } catch {
+        } catch (error) {
+          console.error(`Catalog page ${p} failed:`, error.message);
           return null;
         }
       })
@@ -299,6 +286,7 @@ async function catalog(id, extras) {
 
     for (const items of results) {
       if (items === null) continue;
+
       if (items.length === 0) exhausted = true;
 
       for (const item of items) {
@@ -306,9 +294,7 @@ async function catalog(id, extras) {
 
         if (
           search &&
-          !String(item.name || "")
-            .toLowerCase()
-            .includes(search)
+          !String(item.name || "").toLowerCase().includes(search)
         ) {
           continue;
         }
@@ -317,8 +303,8 @@ async function catalog(id, extras) {
       }
     }
 
-    if (results.every((items) =>
-      items === null || items.length === 0
+    if (results.every(
+      (items) => items === null || items.length === 0
     )) {
       break;
     }
@@ -332,9 +318,11 @@ async function catalog(id, extras) {
 }
 
 function parseStreamLinks(links) {
-  return (Array.isArray(links) ? links : [])
-    .filter((link) => link && link.url)
-    .map((link) => {
+  if (!Array.isArray(links)) return [];
+
+  return links
+    .filter((link) => link && typeof link.url === "string" && link.url)
+    .map((link, index) => {
       const stream = {
         name: `CTGMovies ${link.quality || "Direct"}`,
         title: `${link.quality || "Direct"} (${link.source || "Server"})`,
@@ -349,15 +337,13 @@ function parseStreamLinks(links) {
         },
       };
 
-      const subs = Array.isArray(link.subs)
-        ? link.subs
-        : [];
+      const subs = Array.isArray(link.subs) ? link.subs : [];
 
       if (subs.length) {
         stream.subtitles = subs
           .filter((sub) => sub && sub.url)
-          .map((sub, index) => ({
-            id: String(index),
+          .map((sub, subIndex) => ({
+            id: `${index}-${subIndex}`,
             url: sub.url,
             lang: sub.label || sub.language || "English",
           }));
@@ -368,7 +354,9 @@ function parseStreamLinks(links) {
 }
 
 async function streamsFor(rawId) {
-  const parts = rawId.split(":");
+  // Important: decode the ID before splitting it.
+  const decodedId = decodeId(rawId);
+  const parts = decodedId.split(":");
 
   if (parts[0] !== "ctg" || parts.length < 3) {
     return { streams: [] };
@@ -407,9 +395,7 @@ async function streamsFor(rawId) {
   }
 
   return {
-    streams: parseStreamLinks(
-      parseJSON(links, [])
-    ),
+    streams: parseStreamLinks(parseJSON(links, [])),
   };
 }
 
@@ -428,10 +414,7 @@ function send(res, status, body) {
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, OPTIONS"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
@@ -469,13 +452,12 @@ module.exports = async function handler(req, res) {
     if (resource === "catalog") {
       const id = parts[2];
       const extras = parseExtras(parts.slice(3));
-      const result = await catalog(id, extras);
-
-      return send(res, 200, result);
+      return send(res, 200, await catalog(id, extras));
     }
 
     if (resource === "meta") {
-      const id = parts.slice(2).join(":");
+      // Fix: decode URL-encoded colons in Stremio IDs.
+      const id = decodeId(parts.slice(2).join(":"));
 
       if (!id) {
         return send(res, 400, { meta: null });
@@ -490,7 +472,8 @@ module.exports = async function handler(req, res) {
     }
 
     if (resource === "stream") {
-      const id = parts.slice(2).join(":");
+      // Fix: decode URL-encoded colons before processing the ID.
+      const id = decodeId(parts.slice(2).join(":"));
 
       if (!id) {
         return send(res, 200, { streams: [] });
